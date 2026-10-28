@@ -1,7 +1,7 @@
 # vf-api-docs
 
-Public API reference for the **VerbaFlo Public API & Event Platform**, hosted at
-**https://docs.verbaflo.ai**.
+Public API reference for the **VerbaFlo Public API & Event Platform**, hosted on GitHub Pages at
+**https://verbaflo.github.io/vf-api-docs/**.
 
 This is a lightweight, zero-build static site:
 
@@ -10,7 +10,6 @@ This is a lightweight, zero-build static site:
 | `openapi.yaml` | OpenAPI 3.1 spec — **the single source of truth**. Everything else just renders it. |
 | `index.html` | Renders `openapi.yaml` with [Scalar](https://github.com/scalar/scalar) (loaded from CDN). |
 | `.github/workflows/pages.yml` | Publishes the site to GitHub Pages on every push to `main`. |
-| `CNAME` | Custom domain (`docs.verbaflo.ai`). |
 | `.nojekyll` | Serves files verbatim (no Jekyll processing). |
 
 ## Scope
@@ -42,5 +41,5 @@ npx @redocly/cli lint openapi.yaml
 ## Deploy
 
 Push to `main`. The GitHub Pages workflow publishes automatically. First-time setup:
-enable **Settings → Pages → Source: GitHub Actions**, and point the `docs.verbaflo.ai` DNS
-record at GitHub Pages (ops).
+enable **Settings → Pages → Source: GitHub Actions**. The site is then served at
+`https://verbaflo.github.io/vf-api-docs/`.
