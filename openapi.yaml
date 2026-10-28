@@ -1,0 +1,1057 @@
+openapi: 3.1.0
+
+info:
+  title: VerbaFlo Public API & Event Platform
+  version: "1.0.0"
+  summary: Trigger multi-channel campaigns, read their results, and receive real-time event webhooks.
+  description: |
+    The VerbaFlo Public API lets you launch outbound campaigns (voice calls, SMS,
+    WhatsApp, email), read each contact's outcome, fetch call recordings, and
+    receive **webhook events** as those campaigns progress.
+
+    ## Base URL & edges
+
+    Everything you call lives behind a single gateway:
+
+    - **`https://api.verbaflo.ai`** — the public gateway. You only ever talk to this host.
+    - Authentication (`POST /oauth/token`) and all `/public/v1/*` endpoints are served here.
+
+    Internal VerbaFlo services are never exposed to you directly.
+
+    ## Tenancy
+
+    Your tenant (`client_code`) is resolved **server-side from your credentials**. You never
+    send it in a header, path, or body. A token issued to you can only ever act on your own data.
+
+    ## Versioning
+
+    All campaign and recording endpoints are under the `/public/v1` prefix. Breaking changes
+    ship under a new prefix; additive changes do not.
+
+    ## Authentication in brief
+
+    1. Exchange your `client_id` / `client_secret` at `POST /oauth/token` for a short-lived
+       **Bearer access token** (an ES256 JWT).
+    2. Send `Authorization: Bearer <access_token>` on every `/public/v1` request.
+    3. Cache the token until it expires (`expires_in`); request a new one when it does.
+
+    Credentials and webhook subscriptions are **provisioned for you by VerbaFlo** — there is no
+    self-serve client or subscription creation in this API yet.
+
+    ## Scopes
+
+    | Scope | Grants |
+    |---|---|
+    | `campaigns:write` | Create campaigns |
+    | `campaigns:read` | Read campaigns, contacts, contact results, and recordings |
+    | `recordings:read` | Reserved for recordings (today recordings are served under `campaigns:read`) |
+    | `webhooks:manage` | Manage webhook subscriptions (provisioning only) |
+
+    Your token is granted the intersection of the scopes you request and the scopes you are
+    allowed. Requesting a scope you do not hold is silently dropped, not an error.
+
+    ## Idempotency
+
+    `POST /public/v1/campaigns` **requires** an `Idempotency-Key` header. The gateway stores the
+    response against `(your client, Idempotency-Key)` for 24 hours and replays it if you retry
+    with the same key, so a dropped connection never creates a duplicate campaign. Reusing a key
+    with a different body, or retrying while the first request is still in flight, is rejected
+    (see the endpoint for status codes).
+
+    ## Rate limiting
+
+    Requests are limited to roughly **120 requests per minute per client**. Over the limit
+    returns `429`. Your allowed source IPs are also enforced at the network edge — share your
+    fixed egress IPs with VerbaFlo during onboarding.
+
+    ## Webhooks (events)
+
+    VerbaFlo delivers **events** to an endpoint you register with us (see the *Events (Webhooks)*
+    section). Events are how you learn that a call connected, completed, went to voicemail, or
+    that a recording is ready. Delivery is at-least-once, so **deduplicate on `event_id`**.
+
+servers:
+  - url: https://api.verbaflo.ai
+    description: Production gateway (confirm final host during onboarding)
+
+tags:
+  - name: Authentication
+    description: Exchange your credentials for a short-lived access token.
+  - name: Campaigns
+    description: Create campaigns and read their contacts and per-contact results.
+  - name: Recordings
+    description: Fetch call recordings for a contact.
+
+security:
+  - oauth2ClientCredentials: []
+
+paths:
+  /oauth/token:
+    post:
+      tags: [Authentication]
+      summary: Get an access token
+      operationId: getAccessToken
+      description: |
+        Exchange your client credentials for a short-lived Bearer access token using the
+        OAuth 2.1 **client credentials** grant. The request body is
+        `application/x-www-form-urlencoded` (not JSON).
+
+        Two credential styles exist, fixed per client at registration:
+
+        - **`client_secret_post`** — send `client_id` and `client_secret` in the body.
+        - **`private_key_jwt`** — send a signed `client_assertion` instead of a secret.
+
+        Cache the returned token until `expires_in` elapses, then request a new one.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/TokenRequest"
+            examples:
+              clientSecretPost:
+                summary: client_secret_post
+                value:
+                  grant_type: client_credentials
+                  client_id: vfc_live_abc123
+                  client_secret: "s3cr3t-value"
+                  scope: campaigns:write campaigns:read
+      responses:
+        "200":
+          description: Token issued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessTokenResponse"
+        "400":
+          description: >
+            Malformed request, e.g. `unsupported_grant_type` or an unregistered `resource`
+            (`invalid_target`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+        "401":
+          description: Invalid client credentials (`invalid_client`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+
+  /public/v1/campaigns:
+    post:
+      tags: [Campaigns]
+      summary: Create a campaign
+      operationId: createCampaign
+      description: |
+        Trigger one campaign for a batch of contacts against a template VerbaFlo has configured
+        for you. Processing is **asynchronous**: a successful call returns **`202 Accepted`**
+        immediately with a per-contact breakdown, and the campaign is scheduled for `scheduled_at`.
+
+        ### Partial acceptance
+        Each contact is validated on its own. One invalid contact is **rejected in place** (it
+        comes back with `status: "rejected"` and an `error_obj`) while the rest are accepted —
+        a bad contact never fails the whole batch. The request only fails outright when the
+        whole request is invalid (see error codes) or **every** contact is rejected
+        (`NO_VALID_CONTACTS`).
+
+        ### contact_ref
+        VerbaFlo mints a `contact_ref` (a UUID) for every accepted contact and returns it in the
+        response, in request order. This is the single public identifier: it is echoed on every
+        webhook event and is the key for every read endpoint. A `contact_ref` you send is ignored.
+
+        ### Scheduling
+        `scheduled_at` must be in the future and **at least 30 minutes ahead**. Campaigns are
+        only dialled within your configured working hours; a time outside them is moved to the
+        next window rather than rejected.
+      security:
+        - oauth2ClientCredentials: [campaigns:write]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CampaignCreateRequest"
+            examples:
+              callCampaign:
+                summary: A voice campaign with one valid and one invalid contact
+                value:
+                  template_id: tmpl_payment_reminder_call
+                  campaign_name: October payment reminders
+                  use_case: payment_reminder
+                  category: finance
+                  modality: call
+                  scheduled_at: "2026-11-01T10:00:00+00:00"
+                  contacts:
+                    - name: Jordan Lee
+                      phone: "+447700900123"
+                      email: jordan@example.com
+                      template_vars:
+                        - key: account
+                          value: "AC-4821"
+                        - key: amount
+                          value: "250.00"
+                    - name: Sam Taylor
+                      template_vars: []
+      responses:
+        "202":
+          description: >
+            Accepted for processing. The body reports which contacts were accepted or rejected.
+            This is returned even when some contacts are rejected.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CampaignCreateResponse"
+        "400":
+          description: >
+            The request as a whole could not be accepted. `error_code` names the reason:
+            `TEMPLATE_NOT_FOUND`, `TEMPLATE_MODALITY_MISMATCH`, `TEMPLATE_TAXONOMY_MISMATCH`,
+            `MODALITY_NOT_SUPPORTED`, `SCHEDULED_AT_NOT_IN_FUTURE`, `SCHEDULED_AT_TOO_SOON`,
+            `TOO_MANY_CONTACTS`, `NO_VALID_CONTACTS`, or `REQUEST_TOO_LARGE`.
+            (`TEMPLATE_NOT_FOUND` is returned as `404`.)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HttpError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The referenced template was not found (`TEMPLATE_NOT_FOUND`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HttpError"
+        "409":
+          description: >
+            An identical `Idempotency-Key` request is already in flight. Retry after it settles.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GatewayError"
+        "422":
+          description: A request-level field failed validation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationError"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /public/v1/campaigns/{campaign_id}/contacts:
+    get:
+      tags: [Campaigns]
+      summary: List a campaign's contacts
+      operationId: listCampaignContacts
+      description: |
+        Return the contacts of a campaign with each one's latest status. Use `offset`/`limit`
+        to page. `campaign_id` is the value returned as `campaign_id` when you created the campaign.
+      security:
+        - oauth2ClientCredentials: [campaigns:read]
+      parameters:
+        - name: campaign_id
+          in: path
+          required: true
+          description: The campaign id returned by *Create a campaign*.
+          schema:
+            type: string
+        - name: offset
+          in: query
+          required: false
+          description: Number of contacts to skip.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of contacts to return.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        "200":
+          description: A page of campaign contacts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CampaignContactList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /public/v1/{modality}/{contact_ref}:
+    get:
+      tags: [Campaigns]
+      summary: Get a contact's result
+      operationId: getContactResult
+      description: |
+        Return the full outcome for a single contact on a given channel: status, call duration,
+        transcript (for calls), summary, sentiment, and any structured extractions/outcomes.
+        The result becomes available once the contact has been reached — poll, or rely on the
+        `status_update` webhook, until it is ready.
+      security:
+        - oauth2ClientCredentials: [campaigns:read]
+      parameters:
+        - name: modality
+          in: path
+          required: true
+          description: The channel the contact was reached on.
+          schema:
+            type: string
+            enum: [call, email, sms, whatsapp]
+        - name: contact_ref
+          in: path
+          required: true
+          description: The contact_ref minted when the campaign was created.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The contact's result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No result for this contact_ref on this channel yet.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HttpError"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /public/v1/recordings/{contact_ref}:
+    get:
+      tags: [Recordings]
+      summary: Get a call recording
+      operationId: getRecording
+      description: |
+        Redirect to a short-lived, pre-signed URL for the contact's call recording (MP3).
+        The response is a **`302 Found`** with the URL in the `Location` header — there is no
+        JSON body. Follow the redirect to download the audio. The signed URL expires quickly,
+        so request this endpoint each time you need the file rather than storing the URL.
+      security:
+        - oauth2ClientCredentials: [campaigns:read]
+      parameters:
+        - name: contact_ref
+          in: path
+          required: true
+          description: The contact_ref minted when the campaign was created.
+          schema:
+            type: string
+      responses:
+        "302":
+          description: Redirect to the pre-signed recording URL.
+          headers:
+            Location:
+              description: Short-lived pre-signed URL for the MP3 recording.
+              schema:
+                type: string
+                format: uri
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No recording available for this contact_ref.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HttpError"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+webhooks:
+  status_update:
+    post:
+      tags: [Events]
+      summary: "Event: status_update"
+      operationId: onStatusUpdate
+      description: |
+        Sent whenever a contact's **call** changes state. Carries an `event_status` describing
+        the new state, and `failed_reason` when the call failed.
+
+        VerbaFlo POSTs this to the `target_url` you registered, with your configured static
+        auth header (default `x-pcs-webhook-token`). Respond `2xx` to acknowledge.
+
+        > In v1, emitted statuses are **call-only**. SMS / email / WhatsApp status events are
+        > not delivered yet.
+      security:
+        - webhookStaticToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StatusUpdateEvent"
+            examples:
+              completed:
+                summary: Call completed
+                value:
+                  event_type: status_update
+                  contact_ref: 2f1b6c2e-9a0d-4c7e-8b1a-9f3c2d4e5a6b
+                  external_campaign_id: cmp_9f8e7d
+                  event_id: evt_a1b2c3d4e5f6_call_completed
+                  occurred_at: "2026-11-01T10:03:21Z"
+                  event_status: call_completed
+              failed:
+                summary: Call failed
+                value:
+                  event_type: status_update
+                  contact_ref: 2f1b6c2e-9a0d-4c7e-8b1a-9f3c2d4e5a6b
+                  external_campaign_id: cmp_9f8e7d
+                  event_id: evt_a1b2c3d4e5f6_call_failed
+                  occurred_at: "2026-11-01T10:03:21Z"
+                  event_status: call_failed
+                  failed_reason: no_answer
+      responses:
+        "2xx":
+          description: Acknowledged. Any 2xx marks the event delivered.
+  recording_completed:
+    post:
+      tags: [Events]
+      summary: "Event: recording_completed"
+      operationId: onRecordingCompleted
+      description: |
+        Sent when a call recording is ready. Carries `recording_url`; it does **not** carry an
+        `event_status`. Respond `2xx` to acknowledge.
+      security:
+        - webhookStaticToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecordingCompletedEvent"
+            examples:
+              ready:
+                summary: Recording ready
+                value:
+                  event_type: recording_completed
+                  contact_ref: 2f1b6c2e-9a0d-4c7e-8b1a-9f3c2d4e5a6b
+                  external_campaign_id: cmp_9f8e7d
+                  event_id: evt_a1b2c3d4e5f6_recording_9f8e7d6c5b4a
+                  occurred_at: "2026-11-01T10:05:00Z"
+                  recording_url: https://recordings.verbaflo.ai/signed/....mp3
+      responses:
+        "2xx":
+          description: Acknowledged. Any 2xx marks the event delivered.
+
+components:
+  securitySchemes:
+    oauth2ClientCredentials:
+      type: oauth2
+      description: "OAuth 2.1 client-credentials. Send the issued token as `Authorization: Bearer <token>`."
+      flows:
+        clientCredentials:
+          tokenUrl: https://api.verbaflo.ai/oauth/token
+          scopes:
+            campaigns:write: Create campaigns
+            campaigns:read: Read campaigns, contacts, results, and recordings
+            recordings:read: Reserved for recordings
+            webhooks:manage: Manage webhook subscriptions (provisioning)
+    webhookStaticToken:
+      type: apiKey
+      in: header
+      name: x-pcs-webhook-token
+      description: >
+        The static auth header VerbaFlo includes on every webhook delivery, so you can verify
+        the call came from us. The header name and secret value are the ones you register. This
+        is the only delivery auth mode available in v1 (HMAC signing is planned).
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >
+        A stable, unique key for this create request. Retrying with the same key replays the
+        original response for 24 hours instead of creating a second campaign.
+      schema:
+        type: string
+        maxLength: 255
+
+  responses:
+    Unauthorized:
+      description: Missing, invalid, or expired access token.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GatewayError"
+    Forbidden:
+      description: The token is valid but lacks the required scope for this route.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GatewayError"
+    RateLimited:
+      description: Too many requests (roughly 120/min/client). Back off and retry.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GatewayError"
+
+  schemas:
+    # ---- Auth ----
+    TokenRequest:
+      type: object
+      required: [grant_type, client_id]
+      properties:
+        grant_type:
+          type: string
+          const: client_credentials
+          description: Must be `client_credentials`.
+        client_id:
+          type: string
+          description: Your client identifier.
+        client_secret:
+          type: string
+          description: Your client secret. Required for the `client_secret_post` style.
+        client_assertion_type:
+          type: string
+          description: >
+            `urn:ietf:params:oauth:client-assertion-type:jwt-bearer`. Used with the
+            `private_key_jwt` style instead of a secret.
+        client_assertion:
+          type: string
+          description: A signed client-assertion JWT. Used with the `private_key_jwt` style.
+        scope:
+          type: string
+          description: >
+            Optional, space-delimited list of scopes. Narrowed to the scopes you are allowed;
+            requesting a disallowed scope is silently dropped.
+        resource:
+          type: string
+          format: uri
+          description: Optional RFC 8707 resource indicator. Defaults to the configured audience.
+    AccessTokenResponse:
+      type: object
+      required: [access_token, token_type, expires_in, scope]
+      properties:
+        access_token:
+          type: string
+          description: "The Bearer access token (an ES256 JWT). Send it as `Authorization: Bearer <token>`."
+        token_type:
+          type: string
+          const: Bearer
+        expires_in:
+          type: integer
+          description: >
+            Seconds until the token expires. Cache the token for this long. The exact value is
+            set per environment — read it from the response rather than hard-coding it.
+          example: 3600
+        scope:
+          type: string
+          description: Space-delimited scopes actually granted.
+          example: campaigns:write campaigns:read
+    OAuthError:
+      type: object
+      description: RFC 6749 OAuth error.
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Error code, e.g. `invalid_client`, `invalid_target`, `unsupported_grant_type`.
+        error_description:
+          type: string
+          description: Human-readable detail.
+
+    # ---- Campaign create ----
+    CampaignCreateRequest:
+      type: object
+      required: [template_id, use_case, category, modality, scheduled_at, contacts]
+      properties:
+        template_id:
+          type: string
+          maxLength: 64
+          description: The template VerbaFlo configured for you to send.
+        campaign_name:
+          type: string
+          maxLength: 200
+          description: Optional label for the campaign. Defaults to a generated name if omitted.
+        use_case:
+          $ref: "#/components/schemas/CampaignUseCase"
+        category:
+          $ref: "#/components/schemas/CampaignCategory"
+        branch:
+          $ref: "#/components/schemas/CampaignBranch"
+        modality:
+          $ref: "#/components/schemas/Modality"
+        scheduled_at:
+          type: string
+          format: date-time
+          description: >
+            When to run the campaign (RFC 3339 with timezone offset). Must be in the future and
+            at least 30 minutes ahead.
+        contacts:
+          type: array
+          minItems: 1
+          maxItems: 20000
+          description: The contacts to reach. Each is validated independently.
+          items:
+            $ref: "#/components/schemas/ContactInput"
+      description: >
+        `use_case`, `category`, `branch`, and `modality` must match the template referenced by
+        `template_id`; a mismatch is rejected.
+    ContactInput:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          maxLength: 200
+          description: Contact's name.
+        email:
+          type: [string, "null"]
+          maxLength: 320
+          description: Required for the `email` modality.
+        phone:
+          type: [string, "null"]
+          maxLength: 32
+          description: E.164 phone. Required for `call` and `sms`.
+        whatsapp_phone:
+          type: [string, "null"]
+          maxLength: 32
+          description: >
+            WhatsApp number. Required for the `whatsapp` modality; falls back to `phone` when empty.
+        template_vars:
+          type: array
+          maxItems: 50
+          default: []
+          description: >
+            Values for the template's variables, as a list of key/value pairs. Each key must be
+            unique within the list.
+          items:
+            $ref: "#/components/schemas/TemplateVariablePair"
+    TemplateVariablePair:
+      type: object
+      required: [key, value]
+      properties:
+        key:
+          type: string
+          maxLength: 100
+          description: The template variable name.
+        value:
+          description: The value to substitute. Coerced to a string; `null` becomes an empty string.
+      example:
+        key: amount
+        value: "250.00"
+
+    CampaignCreateResponse:
+      type: object
+      required: [batch_id, campaign_id, scheduled_at, accepted_count, rejected_count, contacts]
+      properties:
+        batch_id:
+          type: string
+          description: Identifier for this create request.
+        campaign_id:
+          type: string
+          description: The campaign identifier. Use it to read contacts; echoed on events as external_campaign_id.
+        scheduled_at:
+          type: string
+          format: date-time
+        accepted_count:
+          type: integer
+        rejected_count:
+          type: integer
+        contacts:
+          type: array
+          description: One result per submitted contact, in request order.
+          items:
+            $ref: "#/components/schemas/ContactCreateResult"
+    ContactCreateResult:
+      type: object
+      required: [index, status]
+      properties:
+        index:
+          type: integer
+          description: Zero-based position of this contact in the request.
+        contact_ref:
+          type: [string, "null"]
+          description: The minted contact_ref for an accepted contact; `null` when rejected.
+        name:
+          type: [string, "null"]
+        email:
+          type: [string, "null"]
+        phone:
+          type: [string, "null"]
+        whatsapp_phone:
+          type: [string, "null"]
+        status:
+          type: string
+          enum: [accepted, rejected]
+        error_obj:
+          oneOf:
+            - $ref: "#/components/schemas/ContactError"
+            - type: "null"
+          description: Why the contact was rejected; `null` when accepted.
+    ContactError:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          $ref: "#/components/schemas/ContactErrorCode"
+        field:
+          type: [string, "null"]
+          description: >
+            The offending field, e.g. `name`, `phone`, `whatsapp_phone`, `email`,
+            `template_vars`, `template_vars.<name>`, or `contact`.
+        message:
+          type: string
+          description: Human-readable explanation and how to fix it.
+    ContactErrorCode:
+      type: string
+      enum:
+        - MISSING_NAME
+        - MISSING_CONTACT_METHOD
+        - INVALID_PHONE
+        - INVALID_EMAIL
+        - MISSING_TEMPLATE_VARIABLE
+        - INVALID_TEMPLATE_VARIABLES
+        - INVALID_CONTACT_FIELD
+      description: Per-contact rejection reason.
+
+    # ---- Contact reads ----
+    CampaignContactList:
+      type: object
+      required: [campaign_id, total, offset, limit, contacts]
+      properties:
+        campaign_id:
+          type: string
+        total:
+          type: integer
+        offset:
+          type: integer
+        limit:
+          type: integer
+        contacts:
+          type: array
+          items:
+            $ref: "#/components/schemas/CampaignContactSummary"
+    CampaignContactSummary:
+      type: object
+      required: [contact_ref, modality]
+      properties:
+        contact_ref:
+          type: string
+        modality:
+          $ref: "#/components/schemas/Modality"
+        event_status:
+          oneOf:
+            - $ref: "#/components/schemas/EventStatus"
+            - $ref: "#/components/schemas/MessageEventStatus"
+            - type: "null"
+          description: Latest status; `null` until the contact has been reached.
+        failed_reason:
+          type: [string, "null"]
+    ContactResult:
+      type: object
+      required: [contact_ref, modality, event_status]
+      properties:
+        contact_ref:
+          type: string
+        campaign_id:
+          type: [string, "null"]
+        modality:
+          $ref: "#/components/schemas/Modality"
+        event_status:
+          oneOf:
+            - $ref: "#/components/schemas/EventStatus"
+            - $ref: "#/components/schemas/MessageEventStatus"
+          description: >
+            The contact's latest status. Calls use the call statuses; message channels
+            (email/sms/whatsapp) use the message statuses.
+        failed_reason:
+          type: [string, "null"]
+          description: Reason the reach-out failed, when applicable.
+        duration_seconds:
+          type: [integer, "null"]
+          description: Call duration in seconds (calls only).
+        triggered_at:
+          type: [string, "null"]
+          format: date-time
+        summary:
+          type: [string, "null"]
+          description: A short summary of the interaction.
+        sentiment:
+          type: [string, "null"]
+        transcript:
+          oneOf:
+            - $ref: "#/components/schemas/CallTranscript"
+            - type: "null"
+          description: Call transcript, when available.
+        extractions:
+          type: object
+          additionalProperties: true
+          default: {}
+          description: Structured non-boolean values extracted from the interaction.
+        outcomes:
+          type: object
+          additionalProperties:
+            type: boolean
+          default: {}
+          description: Boolean outcomes extracted from the interaction.
+        goal_status:
+          oneOf:
+            - $ref: "#/components/schemas/GoalStatusReport"
+            - type: "null"
+    CallTranscript:
+      type: object
+      required: [text, segments]
+      properties:
+        text:
+          type: string
+          description: Full transcript text.
+        segments:
+          type: array
+          items:
+            $ref: "#/components/schemas/TranscriptSegment"
+    TranscriptSegment:
+      type: object
+      required: [speaker, start_time, content]
+      properties:
+        speaker:
+          type: string
+        start_time:
+          type: string
+          format: date-time
+        end_time:
+          type: [string, "null"]
+          format: date-time
+        content:
+          type: string
+    GoalStatusReport:
+      type: object
+      properties:
+        status:
+          type: [string, "null"]
+          description: e.g. reached, in_progress, at_risk, not_reached, no_engagement.
+        description:
+          type: [string, "null"]
+
+    # ---- Events (webhooks) ----
+    StatusUpdateEvent:
+      type: object
+      required: [event_type, contact_ref, event_id, occurred_at]
+      properties:
+        event_type:
+          type: string
+          const: status_update
+        contact_ref:
+          type: string
+          description: The contact this event is about.
+        external_campaign_id:
+          type: string
+          description: The campaign id (omitted if not applicable).
+        event_id:
+          type: string
+          description: Stable, unique event id. Deduplicate on this — delivery is at-least-once.
+        occurred_at:
+          type: string
+          format: date-time
+        event_status:
+          $ref: "#/components/schemas/EventStatus"
+        failed_reason:
+          $ref: "#/components/schemas/FailedReason"
+      description: Omitted fields (e.g. failed_reason on a success) are absent, not null.
+    RecordingCompletedEvent:
+      type: object
+      required: [event_type, contact_ref, event_id, occurred_at, recording_url]
+      properties:
+        event_type:
+          type: string
+          const: recording_completed
+        contact_ref:
+          type: string
+        external_campaign_id:
+          type: string
+        event_id:
+          type: string
+          description: Stable, unique event id. Deduplicate on this.
+        occurred_at:
+          type: string
+          format: date-time
+        recording_url:
+          type: string
+          format: uri
+          description: URL to the recording.
+
+    # ---- Enums ----
+    Modality:
+      type: string
+      enum: [call, email, sms, whatsapp]
+      description: The channel a campaign or contact uses.
+    EventStatus:
+      type: string
+      enum:
+        - call_connected
+        - call_completed
+        - call_voicemail
+        - call_unanswered
+        - call_failed
+        - callback_received
+      description: Call status. The only statuses emitted on webhook events in v1.
+    MessageEventStatus:
+      type: string
+      enum:
+        - message_sent
+        - message_delivered
+        - message_opened
+        - message_clicked
+        - message_replied
+        - message_failed
+        - message_blocked
+        - message_unsubscribed
+      description: >
+        Message status for email/sms/whatsapp. Appears on contact-result reads only; not
+        delivered on webhook events in v1.
+    FailedReason:
+      type: string
+      enum: [no_answer, busy, declined, blocked, network_error, unknown]
+      description: Why a call failed. Present on a `call_failed` status only.
+    CampaignUseCase:
+      type: string
+      description: Campaign use case. Must match the template. Values VerbaFlo supports.
+      enum:
+        - sales_call
+        - followup_call
+        - viewing_schedule
+        - lead_qualification
+        - lead_qualification_new
+        - rebooking
+        - pre_check_in_support
+        - post_move_in
+        - referral
+        - payment_reminder
+        - upsell_opportunities
+        - marketing
+        - late_payment_handling
+        - feedback_collection
+        - check_out_coordination
+        - setup_assistance
+        - inspection_and_maintenance_scheduling
+        - event_registration
+        - payment_plan_negotiations
+        - community_management
+        - wellbeing
+        - mental_wellbeing
+        - legal_compliance_assistance
+        - notifications_and_triggers
+        - marketing_lost_lead
+        - payment_defaulters
+        - promotions_and_discounts
+        - deposit_pending
+        - check_in
+        - newsletter
+        - enquiry_acknowledgement
+        - confirm_booking
+        - viewing
+        - booking_confirmation
+        - refer_and_earn
+        - agreement_signing
+        - waitlist_acknowledgement
+        - availability_released
+        - rebooker_confirmation
+        - maintenance_request_follow_ups
+        - maintenance_announcement
+        - internal_alert
+    CampaignCategory:
+      type: string
+      description: Campaign category. Must match the template.
+      enum: [sales, marketing, finance, operations, maintenance]
+    CampaignBranch:
+      type: string
+      description: Optional campaign branch. Must match the template when set.
+      enum:
+        - viewing_schedule_outreach
+        - viewing_schedule_confirmation
+        - viewing_follow_up
+        - rooms
+        - onboarding_packs
+        - direct_debit
+        - 1_month_rent_free
+        - check_in_instructions
+        - newsletter
+        - enquiry_acknowledgement
+        - confirm_booking
+        - viewing
+        - feedback_collection
+        - check_in_reminder
+        - utility_setup
+        - application_sign_up
+        - health_and_well_being
+        - campaign_paddington_citi_view_rebooking_nudge
+        - late_payment_handling
+        - move_in_date_confirmation
+        - check_in_day_welcome
+        - amenities_and_services_reminder
+        - event_updates
+        - mid_term_inspection
+        - wifi_issues
+        - fire_alarm
+        - security_update
+        - discount_code
+        - availability_released
+        - rebooker_feedback_collection
+
+    # ---- Error envelopes ----
+    HttpError:
+      type: object
+      description: Request-level error from the campaign service.
+      properties:
+        error_id:
+          type: string
+        detail:
+          type: string
+          description: Human-readable message.
+        type:
+          type: string
+          example: http_error
+        error_code:
+          type: string
+          description: Stable machine-readable code (e.g. TEMPLATE_NOT_FOUND).
+        entity_type:
+          type: [string, "null"]
+        extra_details:
+          type: object
+          additionalProperties: true
+    ValidationError:
+      type: object
+      description: A request-level field failed validation.
+      properties:
+        error_id:
+          type: string
+        detail:
+          type: string
+        type:
+          type: string
+          const: validation_error
+        extra_details:
+          type: object
+          properties:
+            field_errors:
+              type: object
+              additionalProperties:
+                type: string
+    GatewayError:
+      type: object
+      description: Error raised at the gateway (auth, scope, rate limit, idempotency).
+      properties:
+        detail:
+          type: string
