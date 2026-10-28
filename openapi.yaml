@@ -161,6 +161,41 @@ paths:
         response, in request order. This is the single public identifier: it is echoed on every
         webhook event and is the key for every read endpoint. A `contact_ref` you send is ignored.
 
+        ### Use case, category, and branch
+        These three are linked. A `use_case` belongs to exactly one `category`, and each use case
+        allows a fixed set of branches (most allow none). Use the combination that matches the
+        template VerbaFlo configured for you.
+
+        | Category | Use case | Allowed branches |
+        |---|---|---|
+        | `sales` | `lead_qualification` | (none) |
+        | `sales` | `lead_qualification_new` | (none) |
+        | `sales` | `waitlist_acknowledgement` | (none) |
+        | `sales` | `rebooking` | (none) |
+        | `sales` | `marketing_lost_lead` | (none) |
+        | `sales` | `booking_confirmation` | (none) |
+        | `sales` | `upsell_opportunities` | `onboarding_packs` |
+        | `sales` | `enquiry_acknowledgement` | `enquiry_acknowledgement` |
+        | `sales` | `confirm_booking` | `confirm_booking` |
+        | `sales` | `viewing` | `viewing_schedule_outreach`, `viewing_schedule_confirmation`, `viewing_follow_up` |
+        | `marketing` | `promotions_and_discounts` | `1_month_rent_free`, `discount_code` |
+        | `marketing` | `refer_and_earn` | (none) |
+        | `marketing` | `newsletter` | `newsletter` |
+        | `marketing` | `availability_released` | `availability_released` |
+        | `finance` | `payment_reminder` | (none) |
+        | `finance` | `payment_defaulters` | (none) |
+        | `finance` | `deposit_pending` | (none) |
+        | `finance` | `late_payment_handling` | `late_payment_handling` |
+        | `operations` | `check_in` | `check_in_instructions`, `check_in_reminder`, `move_in_date_confirmation` |
+        | `operations` | `feedback_collection` | `feedback_collection`, `rebooker_feedback_collection` |
+        | `operations` | `rebooker_confirmation` | (none) |
+        | `operations` | `agreement_signing` | (none) |
+        | `operations` | `wellbeing` | `health_and_well_being` |
+        | `operations` | `setup_assistance` | `utility_setup` |
+        | `operations` | `notifications_and_triggers` | `direct_debit`, `application_sign_up`, `check_in_day_welcome`, `amenities_and_services_reminder`, `event_updates`, `mid_term_inspection`, `wifi_issues`, `fire_alarm`, `security_update` |
+        | `maintenance` | `maintenance_request_follow_ups` | (none) |
+        | `maintenance` | `maintenance_announcement` | (none) |
+
         ### Scheduling
         `scheduled_at` must be in the future and **at least 10 minutes ahead**. Campaigns are
         only dialled within your configured working hours; a time outside them is moved to the
@@ -919,80 +954,76 @@ components:
         as an open set. Common values include no_answer, busy, declined, blocked, network_error,
         and unknown.
       examples: [no_answer, busy, network_error]
+    CampaignCategory:
+      type: string
+      description: >
+        Campaign category. Each category owns a fixed set of use cases. Must match the template.
+        See the taxonomy table on *Create a campaign* for valid category/use_case/branch combinations.
+      enum: [sales, marketing, finance, operations, maintenance]
     CampaignUseCase:
       type: string
-      description: Campaign use case. Must match the template. Values VerbaFlo supports.
+      description: >
+        Campaign use case. Belongs to one category and allows a fixed set of branches. Must match
+        the template. See the taxonomy table on *Create a campaign* for valid combinations.
       enum:
-        - sales_call
-        - followup_call
-        - viewing_schedule
+        # sales
         - lead_qualification
         - lead_qualification_new
+        - waitlist_acknowledgement
         - rebooking
-        - pre_check_in_support
-        - post_move_in
-        - referral
-        - payment_reminder
-        - upsell_opportunities
-        - marketing
-        - late_payment_handling
-        - feedback_collection
-        - check_out_coordination
-        - setup_assistance
-        - inspection_and_maintenance_scheduling
-        - event_registration
-        - payment_plan_negotiations
-        - community_management
-        - wellbeing
-        - mental_wellbeing
-        - legal_compliance_assistance
-        - notifications_and_triggers
         - marketing_lost_lead
-        - payment_defaulters
-        - promotions_and_discounts
-        - deposit_pending
-        - check_in
-        - newsletter
+        - booking_confirmation
+        - upsell_opportunities
         - enquiry_acknowledgement
         - confirm_booking
         - viewing
-        - booking_confirmation
+        # marketing
+        - promotions_and_discounts
         - refer_and_earn
-        - agreement_signing
-        - waitlist_acknowledgement
+        - newsletter
         - availability_released
+        # finance
+        - payment_reminder
+        - payment_defaulters
+        - deposit_pending
+        - late_payment_handling
+        # operations
+        - check_in
+        - feedback_collection
         - rebooker_confirmation
+        - agreement_signing
+        - wellbeing
+        - setup_assistance
+        - notifications_and_triggers
+        # maintenance
         - maintenance_request_follow_ups
         - maintenance_announcement
-        - internal_alert
-    CampaignCategory:
-      type: string
-      description: Campaign category. Must match the template.
-      enum: [sales, marketing, finance, operations, maintenance]
     CampaignBranch:
       type: string
-      description: Optional campaign branch. Must match the template when set.
+      description: >
+        Optional campaign branch. When set, must be a branch allowed for the chosen `use_case`
+        and match the template. See the taxonomy table on *Create a campaign*.
       enum:
+        - onboarding_packs
+        - enquiry_acknowledgement
+        - confirm_booking
         - viewing_schedule_outreach
         - viewing_schedule_confirmation
         - viewing_follow_up
-        - rooms
-        - onboarding_packs
-        - direct_debit
         - 1_month_rent_free
-        - check_in_instructions
+        - discount_code
         - newsletter
-        - enquiry_acknowledgement
-        - confirm_booking
-        - viewing
-        - feedback_collection
-        - check_in_reminder
-        - utility_setup
-        - application_sign_up
-        - health_and_well_being
-        - campaign_paddington_citi_view_rebooking_nudge
+        - availability_released
         - late_payment_handling
+        - check_in_instructions
+        - check_in_reminder
         - move_in_date_confirmation
+        - feedback_collection
+        - rebooker_feedback_collection
+        - health_and_well_being
+        - utility_setup
+        - direct_debit
+        - application_sign_up
         - check_in_day_welcome
         - amenities_and_services_reminder
         - event_updates
@@ -1000,9 +1031,6 @@ components:
         - wifi_issues
         - fire_alarm
         - security_update
-        - discount_code
-        - availability_released
-        - rebooker_feedback_collection
 
     # ---- Error envelopes ----
     HttpError:
