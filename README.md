@@ -7,7 +7,7 @@ This is a lightweight, zero-build static site:
 
 | File | Role |
 |---|---|
-| `openapi.yaml` | OpenAPI 3.1 spec — **the single source of truth**. Everything else just renders it. |
+| `openapi.yaml` | OpenAPI 3.1 spec, **the single source of truth**. Everything else just renders it. |
 | `index.html` | Renders `openapi.yaml` with [Scalar](https://github.com/scalar/scalar) (loaded from CDN). |
 | `.github/workflows/pages.yml` | Publishes the site to GitHub Pages on every push to `main`. |
 | `.nojekyll` | Serves files verbatim (no Jekyll processing). |
@@ -22,7 +22,7 @@ provisioning/admin routes are intentionally not documented here.
 
 The spec is **authored from the shipped service code** (vf-webhook gateway, vf-auth-service,
 vf-core_v2, vf-event-relay, config-model), not from a design doc. When a route or model changes
-in those services, update `openapi.yaml` to match — it is hand-maintained, not generated.
+in those services, update `openapi.yaml` to match. It is hand-maintained, not generated.
 
 ## Preview locally
 

@@ -13,7 +13,7 @@ info:
 
     Everything you call lives behind a single gateway:
 
-    - **`https://api.verbaflo.ai`** — the public gateway. You only ever talk to this host.
+    - **`https://stg-api.verbaflo.com`** is the public gateway. You only ever talk to this host.
     - Authentication (`POST /oauth/token`) and all `/public/v1/*` endpoints are served here.
 
     Internal VerbaFlo services are never exposed to you directly.
@@ -35,7 +35,7 @@ info:
     2. Send `Authorization: Bearer <access_token>` on every `/public/v1` request.
     3. Cache the token until it expires (`expires_in`); request a new one when it does.
 
-    Credentials and webhook subscriptions are **provisioned for you by VerbaFlo** — there is no
+    Credentials and webhook subscriptions are **provisioned for you by VerbaFlo**. There is no
     self-serve client or subscription creation in this API yet.
 
     ## Scopes
@@ -61,7 +61,7 @@ info:
     ## Rate limiting
 
     Requests are limited to roughly **120 requests per minute per client**. Over the limit
-    returns `429`. Your allowed source IPs are also enforced at the network edge — share your
+    returns `429`. Your allowed source IPs are also enforced at the network edge, so share your
     fixed egress IPs with VerbaFlo during onboarding.
 
     ## Webhooks (events)
@@ -71,8 +71,8 @@ info:
     that a recording is ready. Delivery is at-least-once, so **deduplicate on `event_id`**.
 
 servers:
-  - url: https://api.verbaflo.ai
-    description: Production gateway (confirm final host during onboarding)
+  - url: https://stg-api.verbaflo.com
+    description: Staging gateway
 
 tags:
   - name: Authentication
@@ -98,8 +98,8 @@ paths:
 
         Two credential styles exist, fixed per client at registration:
 
-        - **`client_secret_post`** — send `client_id` and `client_secret` in the body.
-        - **`private_key_jwt`** — send a signed `client_assertion` instead of a secret.
+        - **`client_secret_post`**: send `client_id` and `client_secret` in the body.
+        - **`private_key_jwt`**: send a signed `client_assertion` instead of a secret.
 
         Cache the returned token until `expires_in` elapses, then request a new one.
       security: []
@@ -151,8 +151,8 @@ paths:
 
         ### Partial acceptance
         Each contact is validated on its own. One invalid contact is **rejected in place** (it
-        comes back with `status: "rejected"` and an `error_obj`) while the rest are accepted —
-        a bad contact never fails the whole batch. The request only fails outright when the
+        comes back with `status: "rejected"` and an `error_obj`) while the rest are accepted.
+        A bad contact never fails the whole batch. The request only fails outright when the
         whole request is invalid (see error codes) or **every** contact is rejected
         (`NO_VALID_CONTACTS`).
 
@@ -162,7 +162,7 @@ paths:
         webhook event and is the key for every read endpoint. A `contact_ref` you send is ignored.
 
         ### Scheduling
-        `scheduled_at` must be in the future and **at least 30 minutes ahead**. Campaigns are
+        `scheduled_at` must be in the future and **at least 10 minutes ahead**. Campaigns are
         only dialled within your configured working hours; a time outside them is moved to the
         next window rather than rejected.
       security:
@@ -228,13 +228,15 @@ paths:
                 $ref: "#/components/schemas/HttpError"
         "409":
           description: >
-            An identical `Idempotency-Key` request is already in flight. Retry after it settles.
+            A request with the same `Idempotency-Key` is still in flight. Retry after it settles.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/GatewayError"
         "422":
-          description: A request-level field failed validation.
+          description: >
+            A request-level field failed validation, or the `Idempotency-Key` was reused with a
+            different request body.
           content:
             application/json:
               schema:
@@ -298,7 +300,7 @@ paths:
       description: |
         Return the full outcome for a single contact on a given channel: status, call duration,
         transcript (for calls), summary, sentiment, and any structured extractions/outcomes.
-        The result becomes available once the contact has been reached — poll, or rely on the
+        The result becomes available once the contact has been reached. Poll, or rely on the
         `status_update` webhook, until it is ready.
       security:
         - oauth2ClientCredentials: [campaigns:read]
@@ -343,7 +345,7 @@ paths:
       operationId: getRecording
       description: |
         Redirect to a short-lived, pre-signed URL for the contact's call recording (MP3).
-        The response is a **`302 Found`** with the URL in the `Location` header — there is no
+        The response is a **`302 Found`** with the URL in the `Location` header. There is no
         JSON body. Follow the redirect to download the audio. The signed URL expires quickly,
         so request this endpoint each time you need the file rather than storing the URL.
       security:
@@ -448,7 +450,7 @@ webhooks:
                   external_campaign_id: cmp_9f8e7d
                   event_id: evt_a1b2c3d4e5f6_recording_9f8e7d6c5b4a
                   occurred_at: "2026-11-01T10:05:00Z"
-                  recording_url: https://recordings.verbaflo.ai/signed/....mp3
+                  recording_url: https://recordings.verbaflo.com/signed/....mp3
       responses:
         "2xx":
           description: Acknowledged. Any 2xx marks the event delivered.
@@ -460,7 +462,7 @@ components:
       description: "OAuth 2.1 client-credentials. Send the issued token as `Authorization: Bearer <token>`."
       flows:
         clientCredentials:
-          tokenUrl: https://api.verbaflo.ai/oauth/token
+          tokenUrl: https://stg-api.verbaflo.com/oauth/token
           scopes:
             campaigns:write: Create campaigns
             campaigns:read: Read campaigns, contacts, results, and recordings
@@ -482,7 +484,8 @@ components:
       required: true
       description: >
         A stable, unique key for this create request. Retrying with the same key replays the
-        original response for 24 hours instead of creating a second campaign.
+        original response for 24 hours instead of creating a second campaign. Omitting it
+        returns 400.
       schema:
         type: string
         maxLength: 255
@@ -554,7 +557,7 @@ components:
           type: integer
           description: >
             Seconds until the token expires. Cache the token for this long. The exact value is
-            set per environment — read it from the response rather than hard-coding it.
+            set per environment, so read it from the response rather than hard-coding it.
           example: 3600
         scope:
           type: string
@@ -598,7 +601,7 @@ components:
           format: date-time
           description: >
             When to run the campaign (RFC 3339 with timezone offset). Must be in the future and
-            at least 30 minutes ahead.
+            at least 10 minutes ahead.
         contacts:
           type: array
           minItems: 1
@@ -807,10 +810,6 @@ components:
             type: boolean
           default: {}
           description: Boolean outcomes extracted from the interaction.
-        goal_status:
-          oneOf:
-            - $ref: "#/components/schemas/GoalStatusReport"
-            - type: "null"
     CallTranscript:
       type: object
       required: [text, segments]
@@ -836,14 +835,6 @@ components:
           format: date-time
         content:
           type: string
-    GoalStatusReport:
-      type: object
-      properties:
-        status:
-          type: [string, "null"]
-          description: e.g. reached, in_progress, at_risk, not_reached, no_engagement.
-        description:
-          type: [string, "null"]
 
     # ---- Events (webhooks) ----
     StatusUpdateEvent:
@@ -861,7 +852,7 @@ components:
           description: The campaign id (omitted if not applicable).
         event_id:
           type: string
-          description: Stable, unique event id. Deduplicate on this — delivery is at-least-once.
+          description: Stable, unique event id. Deduplicate on this, because delivery is at-least-once.
         occurred_at:
           type: string
           format: date-time
@@ -923,8 +914,11 @@ components:
         delivered on webhook events in v1.
     FailedReason:
       type: string
-      enum: [no_answer, busy, declined, blocked, network_error, unknown]
-      description: Why a call failed. Present on a `call_failed` status only.
+      description: >
+        Why a call failed. Present on a `call_failed` status only. A free-form string, treat it
+        as an open set. Common values include no_answer, busy, declined, blocked, network_error,
+        and unknown.
+      examples: [no_answer, busy, network_error]
     CampaignUseCase:
       type: string
       description: Campaign use case. Must match the template. Values VerbaFlo supports.
