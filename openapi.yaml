@@ -381,8 +381,10 @@ paths:
       description: |
         Redirect to a short-lived, pre-signed URL for the contact's call recording (MP3).
         The response is a **`302 Found`** with the URL in the `Location` header. There is no
-        JSON body. Follow the redirect to download the audio. The signed URL expires quickly,
-        so request this endpoint each time you need the file rather than storing the URL.
+        JSON body. HTTP clients that follow redirects automatically (browsers, `curl -L`, most
+        request libraries) will end up downloading the file with a `200` from the storage URL.
+        The signed URL expires quickly, so request this endpoint each time you need the file
+        rather than storing the URL.
       security:
         - oauth2ClientCredentials: [campaigns:read]
       parameters:
