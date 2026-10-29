@@ -67,8 +67,9 @@ info:
     ## Webhooks (events)
 
     VerbaFlo delivers **events** to an endpoint you register with us (see the *Events (Webhooks)*
-    section). Events are how you learn that a call connected, completed, went to voicemail, or
-    that a recording is ready. Delivery is at-least-once, so **deduplicate on `event_id`**.
+    section). Events are how you learn that a call connected, completed, went to voicemail, that
+    a recording is ready, or that post-call processing has produced extracted results. Delivery
+    is at-least-once, so **deduplicate on `event_id`**.
 
 servers:
   - url: https://stg-api.verbaflo.com
@@ -245,8 +246,8 @@ paths:
             The request as a whole could not be accepted. `error_code` names the reason:
             `TEMPLATE_NOT_FOUND`, `TEMPLATE_MODALITY_MISMATCH`, `TEMPLATE_TAXONOMY_MISMATCH`,
             `MODALITY_NOT_SUPPORTED`, `SCHEDULED_AT_NOT_IN_FUTURE`, `SCHEDULED_AT_TOO_SOON`,
-            `TOO_MANY_CONTACTS`, `NO_VALID_CONTACTS`, or `REQUEST_TOO_LARGE`.
-            (`TEMPLATE_NOT_FOUND` is returned as `404`.)
+            `TOO_MANY_CONTACTS`, `NO_VALID_CONTACTS`, `CAMPAIGN_NAME_ALREADY_EXISTS`, or
+            `REQUEST_TOO_LARGE`. (`TEMPLATE_NOT_FOUND` is returned as `404`.)
           content:
             application/json:
               schema:
@@ -336,7 +337,7 @@ paths:
         Return the full outcome for a single contact on a given channel: status, call duration,
         transcript (for calls), summary, sentiment, and any structured extractions/outcomes.
         The result becomes available once the contact has been reached. Poll, or rely on the
-        `status_update` webhook, until it is ready.
+        `status_update` and `processing_completed` webhooks, until it is ready.
       security:
         - oauth2ClientCredentials: [campaigns:read]
       parameters:
@@ -379,12 +380,10 @@ paths:
       summary: Get a call recording
       operationId: getRecording
       description: |
-        Redirect to a short-lived, pre-signed URL for the contact's call recording (MP3).
-        The response is a **`302 Found`** with the URL in the `Location` header. There is no
-        JSON body. HTTP clients that follow redirects automatically (browsers, `curl -L`, most
-        request libraries) will end up downloading the file with a `200` from the storage URL.
-        The signed URL expires quickly, so request this endpoint each time you need the file
-        rather than storing the URL.
+        Return a short-lived, pre-signed URL for the contact's call recording (MP3). The
+        response is a `200` with a JSON body `{ "recording_url": "..." }`. The URL is signed
+        and expires quickly, so request this endpoint each time you need the file rather than
+        storing the URL.
       security:
         - oauth2ClientCredentials: [campaigns:read]
       parameters:
@@ -395,14 +394,12 @@ paths:
           schema:
             type: string
       responses:
-        "302":
-          description: Redirect to the pre-signed recording URL.
-          headers:
-            Location:
-              description: Short-lived pre-signed URL for the MP3 recording.
+        "200":
+          description: The pre-signed recording URL.
+          content:
+            application/json:
               schema:
-                type: string
-                format: uri
+                $ref: "#/components/schemas/ContactRecording"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -449,6 +446,10 @@ webhooks:
                   event_id: evt_a1b2c3d4e5f6_call_completed
                   occurred_at: "2026-11-01T10:03:21Z"
                   event_status: call_completed
+                  contact_metadata:
+                    crm_id: "contact-8831"
+                  campaign_metadata:
+                    source: "nightly-sync"
               failed:
                 summary: Call failed
                 value:
@@ -487,6 +488,48 @@ webhooks:
                   external_campaign_id: cmp_9f8e7d
                   event_id: evt_a1b2c3d4e5f6_recording_9f8e7d6c5b4a
                   occurred_at: "2026-11-01T10:05:00Z"
+                  recording_url: https://recordings.verbaflo.com/signed/....mp3
+      responses:
+        "2xx":
+          description: Acknowledged. Any 2xx marks the event delivered.
+  processing_completed:
+    post:
+      tags: [Events]
+      summary: "Event: processing_completed"
+      operationId: onProcessingCompleted
+      description: |
+        Sent when post-call processing has produced usable results for a contact — the
+        structured `extractions` and/or boolean `outcomes` from the interaction. It is **re-fired
+        whenever those results genuinely change**, so deduplicate on `event_id` and treat the
+        latest event as authoritative.
+
+        Carries `extractions`, `outcomes`, `recording_url` (when a recording is available), and
+        `lead_id`. The `extractions`/`outcomes` match what `GET /public/v1/{modality}/{contact_ref}`
+        returns. It does **not** carry an `event_status`. Respond `2xx` to acknowledge.
+      security:
+        - webhookStaticToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProcessingCompletedEvent"
+            examples:
+              processed:
+                summary: Results extracted
+                value:
+                  event_type: processing_completed
+                  contact_ref: 2f1b6c2e-9a0d-4c7e-8b1a-9f3c2d4e5a6b
+                  external_campaign_id: cmp_9f8e7d
+                  lead_id: lead_7a6b5c4d
+                  event_id: evt_a1b2c3d4e5f6_processing_3c2b1a0f9e8d
+                  occurred_at: "2026-11-01T10:06:30Z"
+                  extractions:
+                    move_in_date: "2026-12-01"
+                    budget: "1200"
+                  outcomes:
+                    interested: true
+                    callback_requested: false
                   recording_url: https://recordings.verbaflo.com/signed/....mp3
       responses:
         "2xx":
@@ -639,6 +682,14 @@ components:
           description: >
             When to run the campaign (RFC 3339 with timezone offset). Must be in the future and
             at least 10 minutes ahead.
+        campaign_metadata:
+          type: object
+          additionalProperties: true
+          default: {}
+          description: >
+            Optional free-form key/value object you attach to the whole campaign. VerbaFlo
+            stores it as-is and echoes it back on every webhook event for this campaign (as
+            `campaign_metadata`). It is not interpreted or validated by VerbaFlo.
         contacts:
           type: array
           minItems: 1
@@ -679,6 +730,15 @@ components:
             unique within the list.
           items:
             $ref: "#/components/schemas/TemplateVariablePair"
+        contact_metadata:
+          type: object
+          additionalProperties: true
+          default: {}
+          description: >
+            Optional free-form key/value object you attach to this contact. VerbaFlo stores it
+            as-is and echoes it back on the contact's reads (`contact_metadata` on the contact
+            result and list) and on every webhook event for the contact. It is not interpreted
+            or validated by VerbaFlo.
     TemplateVariablePair:
       type: object
       required: [key, value]
@@ -800,6 +860,11 @@ components:
           description: Latest status; `null` until the contact has been reached.
         failed_reason:
           type: [string, "null"]
+        contact_metadata:
+          type: object
+          additionalProperties: true
+          default: {}
+          description: The free-form key/value object you supplied for this contact on create.
     ContactResult:
       type: object
       required: [contact_ref, modality, event_status]
@@ -836,6 +901,12 @@ components:
             - $ref: "#/components/schemas/CallTranscript"
             - type: "null"
           description: Call transcript, when available.
+        recording_url:
+          type: [string, "null"]
+          description: >
+            Pre-signed URL for the call recording (MP3), when available. It expires quickly,
+            so fetch it rather than storing it. The same URL is served by
+            `GET /public/v1/recordings/{contact_ref}`.
         extractions:
           type: object
           additionalProperties: true
@@ -847,6 +918,11 @@ components:
             type: boolean
           default: {}
           description: Boolean outcomes extracted from the interaction.
+        contact_metadata:
+          type: object
+          additionalProperties: true
+          default: {}
+          description: The free-form key/value object you supplied for this contact on create.
     CallTranscript:
       type: object
       required: [text, segments]
@@ -872,6 +948,14 @@ components:
           format: date-time
         content:
           type: string
+    ContactRecording:
+      type: object
+      required: [recording_url]
+      properties:
+        recording_url:
+          type: string
+          format: uri
+          description: Short-lived pre-signed URL for the MP3 recording. It expires quickly.
 
     # ---- Events (webhooks) ----
     StatusUpdateEvent:
@@ -897,6 +981,14 @@ components:
           $ref: "#/components/schemas/EventStatus"
         failed_reason:
           $ref: "#/components/schemas/FailedReason"
+        contact_metadata:
+          type: object
+          additionalProperties: true
+          description: The contact's metadata, echoed from create. Absent when empty.
+        campaign_metadata:
+          type: object
+          additionalProperties: true
+          description: The campaign's metadata, echoed from create. Absent when empty.
       description: Omitted fields (e.g. failed_reason on a success) are absent, not null.
     RecordingCompletedEvent:
       type: object
@@ -919,6 +1011,63 @@ components:
           type: string
           format: uri
           description: URL to the recording.
+        contact_metadata:
+          type: object
+          additionalProperties: true
+          description: The contact's metadata, echoed from create. Absent when empty.
+        campaign_metadata:
+          type: object
+          additionalProperties: true
+          description: The campaign's metadata, echoed from create. Absent when empty.
+    ProcessingCompletedEvent:
+      type: object
+      required: [event_type, contact_ref, event_id, occurred_at]
+      properties:
+        event_type:
+          type: string
+          const: processing_completed
+        contact_ref:
+          type: string
+          description: The contact this event is about.
+        external_campaign_id:
+          type: string
+          description: The campaign id (omitted if not applicable).
+        lead_id:
+          type: string
+          description: >
+            VerbaFlo's identifier for the lead this contact resolved to. Present on
+            `processing_completed` events; absent when no lead is associated.
+        event_id:
+          type: string
+          description: Stable, unique event id. Deduplicate on this, because delivery is at-least-once.
+        occurred_at:
+          type: string
+          format: date-time
+        extractions:
+          type: object
+          additionalProperties: true
+          description: Structured non-boolean values extracted from the interaction.
+        outcomes:
+          type: object
+          additionalProperties:
+            type: boolean
+          description: Boolean outcomes extracted from the interaction.
+        recording_url:
+          type: string
+          format: uri
+          description: Pre-signed recording URL, included when a recording is available.
+        contact_metadata:
+          type: object
+          additionalProperties: true
+          description: The contact's metadata, echoed from create. Absent when empty.
+        campaign_metadata:
+          type: object
+          additionalProperties: true
+          description: The campaign's metadata, echoed from create. Absent when empty.
+      description: >
+        Fired when post-call processing produces usable results for a contact, and re-fired
+        whenever those results genuinely change. The `extractions` and `outcomes` mirror the
+        contact-result read. Omitted fields are absent, not null.
 
     # ---- Enums ----
     Modality:
