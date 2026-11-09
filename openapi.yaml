@@ -150,6 +150,12 @@ paths:
         for you. Processing is **asynchronous**: a successful call returns **`202 Accepted`**
         immediately with a per-contact breakdown, and the campaign is scheduled for `scheduled_at`.
 
+        ### Choosing the template
+        Reference the template by **exactly one** of `template_id` or `template_name` (its exact
+        title). Sending both or neither is rejected (`422`); a `template_id` that is not a valid
+        id is rejected (`400 INVALID_TEMPLATE_ID`); an id or name that matches no template is
+        `404 TEMPLATE_NOT_FOUND`.
+
         ### Partial acceptance
         Each contact is validated on its own. One invalid contact is **rejected in place** (it
         comes back with `status: "rejected"` and an `error_obj`) while the rest are accepted.
@@ -232,6 +238,21 @@ paths:
                           value: "250.00"
                     - name: Sam Taylor
                       template_vars: []
+              callCampaignByName:
+                summary: Selecting the template by name instead of id
+                value:
+                  template_name: Payment Reminder Call
+                  campaign_name: October payment reminders
+                  use_case: payment_reminder
+                  category: finance
+                  modality: call
+                  scheduled_at: "2026-11-01T10:00:00+00:00"
+                  contacts:
+                    - name: Jordan Lee
+                      phone: "+447700900123"
+                      template_vars:
+                        - key: account
+                          value: "AC-4821"
       responses:
         "202":
           description: >
@@ -244,6 +265,7 @@ paths:
         "400":
           description: >
             The request as a whole could not be accepted. `error_code` names the reason:
+            `INVALID_TEMPLATE_ID` (the `template_id` is not a valid template id),
             `TEMPLATE_NOT_FOUND`, `TEMPLATE_MODALITY_MISMATCH`, `TEMPLATE_TAXONOMY_MISMATCH`,
             `MODALITY_NOT_SUPPORTED`, `SCHEDULED_AT_NOT_IN_FUTURE`, `SCHEDULED_AT_TOO_SOON`,
             `TOO_MANY_CONTACTS`, `NO_VALID_CONTACTS`, `CAMPAIGN_NAME_ALREADY_EXISTS`, or
@@ -271,8 +293,9 @@ paths:
                 $ref: "#/components/schemas/GatewayError"
         "422":
           description: >
-            A request-level field failed validation, or the `Idempotency-Key` was reused with a
-            different request body.
+            A request-level field failed validation — including sending both or neither of
+            `template_id` and `template_name` (`TEMPLATE_IDENTIFIER_REQUIRED`; send exactly one) —
+            or the `Idempotency-Key` was reused with a different request body.
           content:
             application/json:
               schema:
@@ -658,12 +681,25 @@ components:
     # ---- Campaign create ----
     CampaignCreateRequest:
       type: object
-      required: [template_id, use_case, category, modality, scheduled_at, contacts]
+      required: [use_case, category, modality, scheduled_at, contacts]
+      oneOf:
+        - required: [template_id]
+        - required: [template_name]
       properties:
         template_id:
           type: string
           maxLength: 64
-          description: The template VerbaFlo configured for you to send.
+          description: >
+            The id of the template VerbaFlo configured for you to send. Send **exactly one** of
+            `template_id` or `template_name`; sending both or neither is rejected (`422`).
+            A value that is not a valid template id is rejected (`400 INVALID_TEMPLATE_ID`).
+        template_name:
+          type: string
+          maxLength: 200
+          description: >
+            The exact title of the template VerbaFlo configured for you, as an alternative to
+            `template_id`. Send **exactly one** of `template_id` or `template_name`. The name
+            must match a template title exactly; no match is rejected (`404 TEMPLATE_NOT_FOUND`).
         campaign_name:
           type: string
           maxLength: 200
@@ -698,8 +734,9 @@ components:
           items:
             $ref: "#/components/schemas/ContactInput"
       description: >
-        `use_case`, `category`, `branch`, and `modality` must match the template referenced by
-        `template_id`; a mismatch is rejected.
+        Send **exactly one** of `template_id` or `template_name` to choose the template.
+        `use_case`, `category`, `branch`, and `modality` must match the referenced template;
+        a mismatch is rejected.
     ContactInput:
       type: object
       required: [name]
